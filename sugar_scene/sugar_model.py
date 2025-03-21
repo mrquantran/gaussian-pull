@@ -2148,7 +2148,7 @@ class SuGaR(nn.Module):
                 print("scales", scales.shape)
             print("screenspace_points", screenspace_points.shape)
 
-        rendered_image, radii = rasterizer(
+        rendered_image, radii,_ = rasterizer(
             means3D = positions,
             means2D = means2D,
             shs = shs,
@@ -2417,7 +2417,8 @@ class SuGaR(nn.Module):
             sh_degree=3,
             campos=camera_center,
             prefiltered=False,
-            debug=False
+            debug=False,
+            antialiasing=False
         )
 
         rasterizer = GaussianRasterizer(raster_settings=raster_settings)
@@ -2444,7 +2445,7 @@ class SuGaR(nn.Module):
 
         means2D = screenspace_points
 
-        rendered_image, radii = rasterizer(
+        rendered_image, radii, depth_image = rasterizer(
             means3D=positions,
             means2D=means2D,
             shs=shs,

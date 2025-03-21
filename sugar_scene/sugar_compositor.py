@@ -219,7 +219,7 @@ class SuGaRCompositor(nn.Module):
                 print("scales", scales.shape)
             print("screenspace_points", screenspace_points.shape)
 
-        rendered_image, radii = rasterizer(
+        rendered_image, radii, _ = rasterizer(
             means3D = positions,
             means2D = means2D,
             shs = shs,
