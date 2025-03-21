@@ -6,7 +6,7 @@ from sugar_scene.cameras import CamerasWrapper
 from sugar_scene.sugar_model import SuGaR
 from sugar_utils.graphics_utils import *
 
-# This script is still in development. 
+# This script is still in development.
 # We used a less clean version of this script for the paper.
 
 class SuGaRCompositor(nn.Module):
@@ -18,17 +18,17 @@ class SuGaRCompositor(nn.Module):
         idx_to_render:list[torch.Tensor],
         *args, **kwargs) -> None:
         super(SuGaR, self).__init__()
-        
+
         self.sugar_models = nn.ModuleList(sugar_models)
         self.idx_to_render = idx_to_render
-        
+
     @property
     def device(self):
         return self.sugar_models[0].device()
-    
+
     def render_image_gaussian_rasterizer(
-        self, 
-        nerf_cameras:CamerasWrapper=None, 
+        self,
+        nerf_cameras:CamerasWrapper=None,
         camera_indices:int=0,
         verbose=False,
         bg_color = None,
@@ -42,6 +42,7 @@ class SuGaRCompositor(nn.Module):
         return_opacities:bool=False,
         return_colors:bool=False,
         positions:torch.Tensor=None,
+        antialiasing:bool=False,
         ):
         """Render an image using the Gaussian Splatting Rasterizer.
 
@@ -85,19 +86,19 @@ class SuGaRCompositor(nn.Module):
         w2c = np.linalg.inv(c2w)
         R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
         T = w2c[:3, 3]
-        
+
         world_view_transform = torch.Tensor(getWorld2View(
             R=R, t=T, tensor=use_torch)).transpose(0, 1).cuda()
-        
+
         proj_transform = getProjectionMatrix(
-            p3d_camera.znear.item(), 
-            p3d_camera.zfar.item(), 
-            nerf_cameras.gs_cameras[0].FoVx, 
+            p3d_camera.znear.item(),
+            p3d_camera.zfar.item(),
+            nerf_cameras.gs_cameras[0].FoVx,
             nerf_cameras.gs_cameras[0].FoVy).transpose(0, 1).cuda()
         # TODO: THE TWO FOLLOWING LINES ARE IMPORTANT! IT'S NOT HERE IN 3DGS CODE! Should make a PR when I have time
         proj_transform[..., 2, 0] = - p3d_camera.K[0, 0, 2]
         proj_transform[..., 2, 1] = - p3d_camera.K[0, 1, 2]
-        
+
         full_proj_transform = (world_view_transform.unsqueeze(0).bmm(proj_transform.unsqueeze(0))).squeeze(0)
 
         camera_center = p3d_camera.get_camera_center()
@@ -117,9 +118,10 @@ class SuGaRCompositor(nn.Module):
             sh_degree=sh_deg,
             campos=camera_center,
             prefiltered=False,
-            debug=False
+            debug=False,
+            antialiasing=antialiasing
         )
-    
+
         rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
         # TODO: Change color computation to match 3DGS paper (remove sigmoid)
@@ -133,13 +135,13 @@ class SuGaRCompositor(nn.Module):
             quaternions = torch.zeros(0, 4, dtype=torch.float, device=self.device)
         scales = torch.zeros(0, 3, dtype=torch.float, device=self.device)
         splat_opacities = torch.zeros(0, 1, dtype=torch.float, device=self.device)
-        
+
         for i_model, sugar_model in enumerate(self.sugar_models):
             idx_to_render = self.idx_to_render[i_model]
-            
+
             if not compute_color_in_rasterizer:
                 if sh_rotations is None or sh_rotations[i_model] is None:
-                    splat_colors_i = sugar_model.get_points_rgb( 
+                    splat_colors_i = sugar_model.get_points_rgb(
                         camera_centers=camera_center,
                         sh_levels=sh_deg+1,)
                 else:
@@ -152,24 +154,24 @@ class SuGaRCompositor(nn.Module):
             else:
                 shs_i = sugar_model.sh_coordinates[idx_to_render]
                 shs = torch.cat([shs, shs_i], dim=0)
-            
+
             splat_opacities_i = sugar_model.strengths.view(-1, 1)[idx_to_render]
             splat_opacities = torch.cat([splat_opacities, splat_opacities_i], dim=0)
-            
+
             if quaternions is None:
                 quaternions_i = sugar_model.quaternions[idx_to_render]
                 quaternions = torch.cat([quaternions, quaternions_i], dim=0)
-            
+
             if not use_same_scale_in_all_directions:
                 scales_i = sugar_model.scaling[idx_to_render]
             else:
                 scales_i = sugar_model.scaling.mean(dim=-1, keepdim=True).expand(-1, 3)[idx_to_render]
             scales = torch.cat([scales, scales_i], dim=0)
-        
+
         if verbose:
             print("Scales:", scales.shape, scales.min(), scales.max())
 
-        if not compute_covariance_in_rasterizer:            
+        if not compute_covariance_in_rasterizer:
             cov3Dmatrix = torch.zeros((scales.shape[0], 3, 3), dtype=torch.float, device=self.device)
             rotation = quaternion_to_matrix(quaternions)
 
@@ -178,7 +180,7 @@ class SuGaRCompositor(nn.Module):
             cov3Dmatrix[:,2,2] = scales[:,2]**2
             cov3Dmatrix = rotation @ cov3Dmatrix @ rotation.transpose(-1, -2)
             # cov3Dmatrix = rotation @ cov3Dmatrix
-            
+
             cov3D = torch.zeros((cov3Dmatrix.shape[0], 6), dtype=torch.float, device=self.device)
 
             cov3D[:, 0] = cov3Dmatrix[:, 0, 0]
@@ -187,12 +189,12 @@ class SuGaRCompositor(nn.Module):
             cov3D[:, 3] = cov3Dmatrix[:, 1, 1]
             cov3D[:, 4] = cov3Dmatrix[:, 1, 2]
             cov3D[:, 5] = cov3Dmatrix[:, 2, 2]
-            
+
             quaternions = None
             scales = None
         else:
             cov3D = None
-        
+
         # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
         # screenspace_points = torch.zeros_like(self._points, dtype=self._points.dtype, requires_grad=True, device=self.device) + 0
         screenspace_points = torch.zeros(len(scales), 3, dtype=scales.dtype, requires_grad=True, device=self.device)
@@ -203,7 +205,7 @@ class SuGaRCompositor(nn.Module):
                 print("WARNING: return_2d_radii is True, but failed to retain grad of screenspace_points!")
                 pass
         means2D = screenspace_points
-        
+
         if verbose:
             print("points", positions.shape)
             if not compute_color_in_rasterizer:
@@ -216,7 +218,7 @@ class SuGaRCompositor(nn.Module):
                 print("quaternions", quaternions.shape)
                 print("scales", scales.shape)
             print("screenspace_points", screenspace_points.shape)
-        
+
         rendered_image, radii = rasterizer(
             means3D = positions,
             means2D = means2D,
@@ -226,10 +228,10 @@ class SuGaRCompositor(nn.Module):
             scales = scales,
             rotations = quaternions,
             cov3D_precomp = cov3D)
-        
+
         if not(return_2d_radii or return_opacities or return_colors):
             return rendered_image.transpose(0, 1).transpose(1, 2)
-        
+
         else:
             outputs = {
                 "image": rendered_image.transpose(0, 1).transpose(1, 2),
@@ -240,6 +242,5 @@ class SuGaRCompositor(nn.Module):
                 outputs["opacities"] = splat_opacities
             if return_colors:
                 outputs["colors"] = splat_colors
-        
+
             return outputs
-        
